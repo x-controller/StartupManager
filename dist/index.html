@@ -232,6 +232,15 @@
       color: var(--text-muted); font-size: 14px;
     }
     .header-actions { display: flex; align-items: center; gap: 12px; }
+
+    .log-modal { width: 700px; max-width: 90vw; }
+    .log-content {
+      background: #0d0d14; border: 1px solid var(--border); border-radius: var(--radius-sm);
+      padding: 16px; margin: 0; height: 400px; overflow-y: auto;
+      font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6;
+      color: #c8c8d8; white-space: pre-wrap; word-break: break-all;
+    }
+    .log-empty { color: var(--text-muted); font-style: italic; }
   </style>
 </head>
 <body>
@@ -279,6 +288,16 @@
           <span class="hint">在工作目录中执行的命令（无需 cd）</span>
         </div>
         <div class="form-group">
+          <label>端口</label>
+          <input type="text" id="inputPort" placeholder="例: 8080" />
+          <span class="hint">项目运行的端口号（可选）</span>
+        </div>
+        <div class="form-group">
+          <label>访问链接</label>
+          <input type="text" id="inputUrl" placeholder="例: http://localhost:8080" />
+          <span class="hint">项目的访问地址（可选）</span>
+        </div>
+        <div class="form-group">
           <label>描述（可选）</label>
           <textarea id="inputDesc" placeholder="项目说明..." rows="2"></textarea>
         </div>
@@ -312,11 +331,28 @@
     </div>
   </div>
 
+  <!-- Log Modal -->
+  <div class="modal-overlay" id="logModal">
+    <div class="modal log-modal">
+      <div class="modal-header">
+        <h2 id="logModalTitle">运行日志</h2>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button class="btn btn-sm" onclick="clearLogs()">清空</button>
+          <button class="btn btn-icon" onclick="closeLogModal()">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" style="padding:16px;">
+        <pre class="log-content" id="logContent"><span class="log-empty">暂无日志</span></pre>
+      </div>
+    </div>
+  </div>
+
   <div class="toast-container" id="toastContainer"></div>
 
   <script>
     // Tauri v2: core module (not 'tauri')
     const { invoke } = window.__TAURI__.core;
+    const { open } = window.__TAURI__.shell;
 
     let projects = [];
     let statuses = {};
@@ -404,13 +440,16 @@
                 ${p.description ? `<div class="card-desc">${escHtml(p.description)}</div>` : ''}
               </div>
               <div class="card-actions">
+                <button class="btn btn-sm btn-icon" title="日志" onclick="openLogModal('${p.id}')">📋</button>
                 <button class="btn btn-sm btn-icon" title="编辑" onclick="openEditModal('${p.id}')">✏️</button>
                 <button class="btn btn-sm btn-icon" title="删除" onclick="openDeleteModal('${p.id}')">🗑️</button>
               </div>
             </div>
             <div class="card-info">
-              <div class="info-row"><span class="info-icon">📁</span>${escHtml(p.directory)}</div>
+              <div class="info-row" style="cursor:pointer;" onclick="openDirectory('${p.id}')" title="在资源管理器中打开"><span class="info-icon">📁</span><span style="text-decoration:underline dotted;">${escHtml(p.directory)}</span></div>
               <div class="info-row"><span class="info-icon">▶</span>${escHtml(p.command)}</div>
+              ${p.port ? `<div class="info-row"><span class="info-icon">🔌</span>端口: ${escHtml(p.port)}</div>` : ''}
+              ${p.url ? `<div class="info-row"><span class="info-icon">🔗</span><a href="javascript:void(0)" onclick="openUrl('${escHtml(p.url)}')" style="color:var(--accent);text-decoration:none;cursor:pointer;">${escHtml(p.url)}</a></div>` : ''}
               ${s.pid ? `<div class="info-row"><span class="info-icon">⚙</span>PID: ${s.pid}</div>` : ''}
             </div>
             <div class="card-footer">
@@ -442,6 +481,8 @@
       document.getElementById('inputName').value = '';
       document.getElementById('inputDir').value = '';
       document.getElementById('inputCmd').value = '';
+      document.getElementById('inputPort').value = '';
+      document.getElementById('inputUrl').value = '';
       document.getElementById('inputDesc').value = '';
       selectedColor = COLORS[0]; renderColorPicker();
       document.getElementById('projectModal').classList.add('active');
@@ -454,6 +495,8 @@
       document.getElementById('inputName').value = p.name;
       document.getElementById('inputDir').value = p.directory;
       document.getElementById('inputCmd').value = p.command;
+      document.getElementById('inputPort').value = p.port || '';
+      document.getElementById('inputUrl').value = p.url || '';
       document.getElementById('inputDesc').value = p.description;
       selectedColor = p.color || COLORS[0]; renderColorPicker();
       document.getElementById('projectModal').classList.add('active');
@@ -464,14 +507,16 @@
       const name = document.getElementById('inputName').value.trim();
       const directory = document.getElementById('inputDir').value.trim();
       const command = document.getElementById('inputCmd').value.trim();
+      const port = document.getElementById('inputPort').value.trim();
+      const url = document.getElementById('inputUrl').value.trim();
       const description = document.getElementById('inputDesc').value.trim();
       if (!name || !directory || !command) { showToast('请填写项目名称、工作目录和启动命令', 'error'); return; }
       try {
         if (editingId) {
-          projects = await invoke('update_project', { id: editingId, name, directory, command, description, color: selectedColor });
+          projects = await invoke('update_project', { id: editingId, name, directory, command, description, color: selectedColor, port, url });
           showToast('项目已更新', 'success');
         } else {
-          projects = await invoke('add_project', { name, directory, command, description, color: selectedColor });
+          projects = await invoke('add_project', { name, directory, command, description, color: selectedColor, port, url });
           showToast('项目已创建', 'success');
         }
         closeModal(); renderAll();
@@ -498,6 +543,49 @@
       document.querySelectorAll('.color-option').forEach(e => e.classList.remove('active'));
       el.classList.add('active');
     }
+    let logViewId = null;
+    let logTimer = null;
+
+    function openLogModal(id) {
+      logViewId = id;
+      const p = projects.find(x => x.id === id);
+      document.getElementById('logModalTitle').textContent = (p ? p.name : '') + ' - 运行日志';
+      document.getElementById('logModal').classList.add('active');
+      fetchLogs();
+      logTimer = setInterval(fetchLogs, 2000);
+    }
+
+    function closeLogModal() {
+      document.getElementById('logModal').classList.remove('active');
+      logViewId = null;
+      if (logTimer) { clearInterval(logTimer); logTimer = null; }
+    }
+
+    async function fetchLogs() {
+      if (!logViewId) return;
+      try {
+        const logs = await invoke('get_project_logs', { id: logViewId });
+        const el = document.getElementById('logContent');
+        if (logs) {
+          el.textContent = logs;
+          el.scrollTop = el.scrollHeight;
+        } else {
+          el.innerHTML = '<span class="log-empty">暂无日志</span>';
+        }
+      } catch (e) {}
+    }
+
+    async function clearLogs() {
+      if (!logViewId) return;
+      // Clear locally by fetching empty - we'll just clear the display
+      document.getElementById('logContent').innerHTML = '<span class="log-empty">暂无日志</span>';
+    }
+
+    function openDirectory(id) {
+      const p = projects.find(x => x.id === id);
+      if (p) invoke('open_directory', { path: p.directory });
+    }
+    function openUrl(url) { open(url); }
     function filterProjects() { renderProjects(); }
     function escHtml(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
     function showToast(msg, type = 'info') {
@@ -509,7 +597,7 @@
     }
 
     document.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { closeModal(); closeDeleteModal(); }
+      if (e.key === 'Escape') { closeModal(); closeDeleteModal(); closeLogModal(); }
       if (e.key === 'Enter' && document.getElementById('projectModal').classList.contains('active')) saveProject();
     });
 

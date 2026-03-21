@@ -3,9 +3,16 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::process::{Child, Command};
-use std::sync::Mutex;
-use tauri::State;
+use std::sync::{Arc, Mutex};
+use tauri::{
+    State,
+    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    menu::{Menu, MenuItem},
+    Manager,
+    WindowEvent,
+};
 
 // ── Data Models ──────────────────────────────────────────────
 
@@ -17,6 +24,10 @@ pub struct Project {
     pub command: String,
     pub description: String,
     pub color: String,
+    #[serde(default)]
+    pub port: String,
+    #[serde(default)]
+    pub url: String,
     pub created_at: String,
 }
 
@@ -32,14 +43,14 @@ pub struct ProjectStatus {
 
 pub struct AppState {
     processes: Mutex<HashMap<String, Child>>,
-    output_logs: Mutex<HashMap<String, String>>,
+    output_logs: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             processes: Mutex::new(HashMap::new()),
-            output_logs: Mutex::new(HashMap::new()),
+            output_logs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -102,6 +113,8 @@ fn add_project(
     command: String,
     description: String,
     color: String,
+    port: String,
+    url: String,
 ) -> Vec<Project> {
     let mut projects = load_projects();
     let id = format!("proj_{}", timestamp_id());
@@ -112,6 +125,8 @@ fn add_project(
         command,
         description,
         color,
+        port,
+        url,
         created_at: timestamp_id(),
     };
     projects.push(project);
@@ -127,6 +142,8 @@ fn update_project(
     command: String,
     description: String,
     color: String,
+    port: String,
+    url: String,
 ) -> Vec<Project> {
     let mut projects = load_projects();
     if let Some(p) = projects.iter_mut().find(|p| p.id == id) {
@@ -135,6 +152,8 @@ fn update_project(
         p.command = command;
         p.description = description;
         p.color = color;
+        p.port = port;
+        p.url = url;
     }
     save_projects(&projects);
     projects
@@ -164,19 +183,71 @@ fn start_project(id: String, state: State<AppState>) -> Result<ProjectStatus, St
         }
     }
 
-    let child = spawn_process(&project.directory, &project.command)?;
+    let mut child = spawn_process(&project.directory, &project.command)?;
     let pid = child.id();
 
-    {
-        let mut processes = state.processes.lock().map_err(|e| e.to_string())?;
-        processes.insert(id.clone(), child);
-    }
+    // Initialize log
     {
         let mut logs = state.output_logs.lock().map_err(|e| e.to_string())?;
         logs.insert(
             id.clone(),
             format!("[Started] PID: {} | {}\n", pid, project.command),
         );
+    }
+
+    // Capture stdout in background thread
+    let logs_ref = Arc::clone(&state.output_logs);
+    let id_clone = id.clone();
+    if let Some(stdout) = child.stdout.take() {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stdout);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    let line = strip_ansi(&line);
+                    if let Ok(mut logs) = logs_ref.lock() {
+                        if let Some(log) = logs.get_mut(&id_clone) {
+                            log.push_str(&line);
+                            log.push('\n');
+                            // Keep last 100KB to avoid unbounded growth
+                            if log.len() > 102400 {
+                                let truncated = log.split_off(log.len() - 81920);
+                                *log = format!("[...truncated...]\n{}", truncated);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // Capture stderr in background thread
+    let logs_ref2 = Arc::clone(&state.output_logs);
+    let id_clone2 = id.clone();
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let reader = BufReader::new(stderr);
+            for line in reader.lines() {
+                if let Ok(line) = line {
+                    let line = strip_ansi(&line);
+                    if let Ok(mut logs) = logs_ref2.lock() {
+                        if let Some(log) = logs.get_mut(&id_clone2) {
+                            log.push_str("[ERR] ");
+                            log.push_str(&line);
+                            log.push('\n');
+                            if log.len() > 102400 {
+                                let truncated = log.split_off(log.len() - 81920);
+                                *log = format!("[...truncated...]\n{}", truncated);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    {
+        let mut processes = state.processes.lock().map_err(|e| e.to_string())?;
+        processes.insert(id.clone(), child);
     }
 
     Ok(ProjectStatus {
@@ -247,6 +318,41 @@ fn get_all_statuses(state: State<AppState>) -> Vec<ProjectStatus> {
         .collect()
 }
 
+#[tauri::command]
+fn open_directory(path: String) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        Command::new("explorer")
+            .arg(&path)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn get_project_logs(id: String, state: State<AppState>) -> String {
+    let logs = state.output_logs.lock().unwrap();
+    logs.get(&id).cloned().unwrap_or_default()
+}
+
 // ── Platform Process Helpers ─────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -255,7 +361,7 @@ fn spawn_process(directory: &str, command: &str) -> Result<Child, String> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
     Command::new("cmd")
-        .args(["/C", &format!("cd /d {} && {}", directory, command)])
+        .args(["/C", &format!("chcp 65001>nul && cd /d {} && {}", directory, command)])
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .creation_flags(CREATE_NO_WINDOW)
@@ -295,6 +401,30 @@ fn kill_process_tree(child: &mut Child) {
 
 // ── Helpers ──────────────────────────────────────────────────
 
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            // Skip ESC [ ... final_byte sequences
+            if let Some(next) = chars.next() {
+                if next == '[' {
+                    // Consume until we hit a letter (0x40–0x7E)
+                    for ch in chars.by_ref() {
+                        if ch.is_ascii_alphabetic() || ch == 'm' {
+                            break;
+                        }
+                    }
+                }
+                // else: skip the single char after ESC
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn timestamp_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let d = SystemTime::now()
@@ -318,7 +448,58 @@ fn main() {
             stop_project,
             get_status,
             get_all_statuses,
+            get_project_logs,
+            open_directory,
         ])
+        .setup(|app| {
+            // 创建托盘菜单
+            let show = MenuItem::with_id(app, "show", "显示窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+
+            // 创建系统托盘图标
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .tooltip("Startup Manager")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            window.show().ok();
+                            window.set_focus().ok();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 双击托盘图标显示窗口
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            window.show().ok();
+                            window.set_focus().ok();
+                        }
+                    }
+                })
+                .build(app)?;
+
+            Ok(())
+        })
+        // 拦截窗口关闭事件，改为隐藏
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                window.hide().ok();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

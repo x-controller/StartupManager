@@ -1,6 +1,6 @@
 {
   "name": "startup-manager",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "Local project startup manager built with Tauri v2",
   "scripts": {
     "tauri": "tauri",

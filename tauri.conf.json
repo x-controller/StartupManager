@@ -1,10 +1,10 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Startup Manager",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "identifier": "com.chmzho.startup-manager",
   "build": {
-    "frontendDist": "."
+    "frontendDist": "./dist"
   },
   "app": {
     "withGlobalTauri": true,
@@ -31,7 +31,12 @@
       "icons/128x128@2x.png",
       "icons/icon.ico"
     ],
-    "targets": "all"
+    "targets": "all",
+    "windows": {
+      "wix": {
+        "language": "zh-CN"
+      }
+    }
   },
   "plugins": {
     "shell": {
