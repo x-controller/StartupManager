@@ -353,6 +353,68 @@ fn get_project_logs(id: String, state: State<AppState>) -> String {
     logs.get(&id).cloned().unwrap_or_default()
 }
 
+// ── Auto Start on Login (Windows Registry) ──────────────────────
+
+#[cfg(target_os = "windows")]
+fn get_exe_path() -> Result<String, String> {
+    use std::env;
+    let exe_path = std::env::current_exe()
+        .map_err(|e| e.to_string())?;
+    let exe_path_str = exe_path.to_string_lossy().to_string();
+    Ok(exe_path_str)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn get_exe_path() -> Result<String, String> {
+    Err("Auto start only supported on Windows".into())
+}
+
+#[tauri::command]
+fn get_auto_start() -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = hkcu.open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            KEY_READ,
+        ).map_err(|e| e.to_string())?;
+        let has_key = run.get_value::<String, _>("StartupManager").is_ok();
+        Ok(has_key)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(false)
+    }
+}
+
+#[tauri::command]
+fn set_auto_start(enable: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let mut run = hkcu.open_subkey_with_flags(
+            "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            KEY_WRITE,
+        ).map_err(|e| e.to_string())?;
+
+        if enable {
+            let exe_path = get_exe_path()?;
+            run.set_value("StartupManager", &exe_path).map_err(|e| e.to_string())?;
+        } else {
+            let _ = run.delete_value("StartupManager");
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("Auto start only supported on Windows".into())
+    }
+}
+
 // ── Platform Process Helpers ─────────────────────────────────
 
 #[cfg(target_os = "windows")]
@@ -450,6 +512,8 @@ fn main() {
             get_all_statuses,
             get_project_logs,
             open_directory,
+            get_auto_start,
+            set_auto_start,
         ])
         .setup(|app| {
             // 创建托盘菜单
