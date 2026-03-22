@@ -357,7 +357,6 @@ fn get_project_logs(id: String, state: State<AppState>) -> String {
 
 #[cfg(target_os = "windows")]
 fn get_exe_path() -> Result<String, String> {
-    use std::env;
     let exe_path = std::env::current_exe()
         .map_err(|e| e.to_string())?;
     let exe_path_str = exe_path.to_string_lossy().to_string();
@@ -396,7 +395,7 @@ fn set_auto_start(enable: bool) -> Result<(), String> {
         use winreg::enums::*;
         use winreg::RegKey;
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let mut run = hkcu.open_subkey_with_flags(
+        let run = hkcu.open_subkey_with_flags(
             "Software\\Microsoft\\Windows\\CurrentVersion\\Run",
             KEY_WRITE,
         ).map_err(|e| e.to_string())?;
