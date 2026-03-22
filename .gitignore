@@ -1,3 +1,27 @@
+# IDE
 .idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Dependencies
 node_modules
+
+# Rust
 target
+Cargo.toml.bak
+
+# Tauri / Build output
+src-tauri/target
+*.msi
+*.exe
+/*.log
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Claude
+.claude/
